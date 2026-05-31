@@ -2255,6 +2255,88 @@ def _admin_initiate_auth(data):
         result.pop("RefreshToken", None)  # AWS doesn't return a new refresh token here
         return json_response({"AuthenticationResult": result})
 
+    if auth_flow == "CUSTOM_AUTH":
+        # Validate ExplicitAuthFlows
+        client = pool["_clients"].get(cid, {})
+        if "ALLOW_CUSTOM_AUTH" not in client.get("ExplicitAuthFlows", []):
+            return error_response_json("InvalidParameterException",
+                    "CUSTOM_AUTH flow not allowed for this client.", 400)
+
+        # Get username
+        username = auth_params.get("USERNAME")
+        if not username:
+            return error_response_json("InvalidParameterException",
+                    "USERNAME is required.", 400)
+
+        # Validate user
+        user, err = _resolve_user(pool, username)
+        if err:
+            return err
+        if not user.get("Enabled", True):
+            return error_response_json("NotAuthorizedException",
+                    "User is disabled.", 400)
+
+        # Extract ClientMetadata (top-level field, NOT inside AuthParameters)
+        client_metadata = data.get("ClientMetadata", {})
+
+        # Build user_attrs dict
+        user_attrs = _attr_list_to_dict(user.get("Attributes", []))
+
+        # Create session
+        token, session = _create_challenge_session(pid, cid, username)
+
+        # Invoke DefineAuthChallenge first
+        define_result, err = _invoke_define_auth_challenge_trigger(
+            pid, cid, username, user_attrs, session
+        )
+        if err:
+            return err
+
+        # Add a pending challenge to session before checking if define/create need to happen
+        _append_challenge_to_session(session, "CUSTOM_CHALLENGE", None, None, {}, {})
+
+        # Invoke CreateAuthChallenge
+        create_result, err = _invoke_create_auth_challenge_trigger(
+            pid, cid, username, user_attrs, session, client_metadata
+        )
+        if err:
+            del _challenge_sessions[token]
+            return err
+
+        # Extract challenge parameters
+        if create_result is not None:
+            public_params = (create_result.get("response", {}) or {}).get("publicChallengeParameters") or {}
+            private_params = (create_result.get("response", {}) or {}).get("privateChallengeParameters") or {}
+            challenge_metadata = (create_result.get("response", {}) or {}).get("challengeMetadata")
+        else:
+            # Default: PROVIDE_AUTH_PARAMETERS
+            public_params = {"challenge": "PROVIDE_AUTH_PARAMETERS"}
+            private_params = {}
+            challenge_metadata = None
+
+        # Update session with challenge parameters
+        if session["challenges"]:
+            session["challenges"][-1].update({
+                "publicChallengeParameters": public_params,
+                "privateChallengeParameters": private_params,
+                "challengeMetadata": challenge_metadata or session["challenges"][-1].get("challengeMetadata"),
+            })
+            session["last_challenge_metadata"] = challenge_metadata
+
+        # Check if DefineAuthChallenge already issued tokens (zero-round bypass)
+        if define_result is not None:
+            define_resp = define_result.get("response", {}) or {}
+            if define_resp.get("issueTokens"):
+                del _challenge_sessions[token]
+                return json_response({"AuthenticationResult": _build_auth_result(pid, cid, user)})
+
+        # Return challenge to client
+        return json_response({
+            "ChallengeName": "CUSTOM_CHALLENGE",
+            "Session": token,
+            "ChallengeParameters": public_params,
+        })
+
     return error_response_json("InvalidParameterException", f"Unsupported AuthFlow: {auth_flow}", 400)
 
 
@@ -2376,6 +2458,88 @@ def _initiate_auth(data):
                 "SALT": base64.b64encode(secrets.token_bytes(16)).hex(),
                 "SECRET_BLOCK": base64.b64encode(secrets.token_bytes(32)).decode(),
             },
+        })
+
+    if auth_flow == "CUSTOM_AUTH":
+        # Validate ExplicitAuthFlows
+        client = pool["_clients"].get(cid, {})
+        if "ALLOW_CUSTOM_AUTH" not in client.get("ExplicitAuthFlows", []):
+            return error_response_json("InvalidParameterException",
+                    "CUSTOM_AUTH flow not allowed for this client.", 400)
+
+        # Get username
+        username = auth_params.get("USERNAME")
+        if not username:
+            return error_response_json("InvalidParameterException",
+                    "USERNAME is required.", 400)
+
+        # Validate user
+        user, err = _resolve_user(pool, username)
+        if err:
+            return err
+        if not user.get("Enabled", True):
+            return error_response_json("NotAuthorizedException",
+                    "User is disabled.", 400)
+
+        # Extract ClientMetadata (top-level field, NOT inside AuthParameters)
+        client_metadata = data.get("ClientMetadata", {})
+
+        # Build user_attrs dict
+        user_attrs = _attr_list_to_dict(user.get("Attributes", []))
+
+        # Create session
+        token, session = _create_challenge_session(pid, cid, username)
+
+        # Invoke DefineAuthChallenge first
+        define_result, err = _invoke_define_auth_challenge_trigger(
+            pid, cid, username, user_attrs, session
+        )
+        if err:
+            return err
+
+        # Add a pending challenge to session before checking if define/create need to happen
+        _append_challenge_to_session(session, "CUSTOM_CHALLENGE", None, None, {}, {})
+
+        # Invoke CreateAuthChallenge
+        create_result, err = _invoke_create_auth_challenge_trigger(
+            pid, cid, username, user_attrs, session, client_metadata
+        )
+        if err:
+            del _challenge_sessions[token]
+            return err
+
+        # Extract challenge parameters
+        if create_result is not None:
+            public_params = (create_result.get("response", {}) or {}).get("publicChallengeParameters") or {}
+            private_params = (create_result.get("response", {}) or {}).get("privateChallengeParameters") or {}
+            challenge_metadata = (create_result.get("response", {}) or {}).get("challengeMetadata")
+        else:
+            # Default: PROVIDE_AUTH_PARAMETERS
+            public_params = {"challenge": "PROVIDE_AUTH_PARAMETERS"}
+            private_params = {}
+            challenge_metadata = None
+
+        # Update session with challenge parameters
+        if session["challenges"]:
+            session["challenges"][-1].update({
+                "publicChallengeParameters": public_params,
+                "privateChallengeParameters": private_params,
+                "challengeMetadata": challenge_metadata or session["challenges"][-1].get("challengeMetadata"),
+            })
+            session["last_challenge_metadata"] = challenge_metadata
+
+        # Check if DefineAuthChallenge already issued tokens (zero-round bypass)
+        if define_result is not None:
+            define_resp = define_result.get("response", {}) or {}
+            if define_resp.get("issueTokens"):
+                del _challenge_sessions[token]
+                return json_response({"AuthenticationResult": _build_auth_result(pid, cid, user)})
+
+        # Return challenge to client
+        return json_response({
+            "ChallengeName": "CUSTOM_CHALLENGE",
+            "Session": token,
+            "ChallengeParameters": public_params,
         })
 
     return error_response_json("InvalidParameterException", f"Unsupported AuthFlow: {auth_flow}", 400)
