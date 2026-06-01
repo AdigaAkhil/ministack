@@ -187,7 +187,7 @@ def test_custom_auth_respond_invalid_session(cognito_idp):
         cognito_idp.respond_to_auth_challenge(
             ClientId=cid,
             ChallengeName="CUSTOM_CHALLENGE",
-            Session="invalid-token",
+            Session="invalid-session-token-1234567890",
             ChallengeResponses={"ANSWER": "test", "USERNAME": "user@example.com"},
         )
     assert exc.value.response["Error"]["Code"] == "InvalidParameterException"
@@ -231,7 +231,13 @@ def test_custom_auth_full_flow_issue_tokens(cognito_idp, lam):
     )
     define_handler = (
         "def handler(event, ctx):\n"
-        "    event['response']['issueTokens'] = True\n"
+        "    session = event['request']['session']\n"
+        "    if not session:\n"
+        "        event['response']['challengeName'] = 'CUSTOM_CHALLENGE'\n"
+        "    elif session[-1].get('challengeResult'):\n"
+        "        event['response']['issueTokens'] = True\n"
+        "    else:\n"
+        "        event['response']['failAuthentication'] = True\n"
         "    return event\n"
     )
     create_arn = _create_lambda(lam, "create-full-flow", create_handler)
@@ -279,7 +285,13 @@ def test_custom_auth_wrong_answer_fail_auth(cognito_idp, lam):
     )
     define_handler = (
         "def handler(event, ctx):\n"
-        "    event['response']['failAuthentication'] = True\n"
+        "    session = event['request']['session']\n"
+        "    if not session:\n"
+        "        event['response']['challengeName'] = 'CUSTOM_CHALLENGE'\n"
+        "    elif session[-1].get('challengeResult'):\n"
+        "        event['response']['issueTokens'] = True\n"
+        "    else:\n"
+        "        event['response']['failAuthentication'] = True\n"
         "    return event\n"
     )
     create_arn = _create_lambda(lam, "create-fail-auth", create_handler)
@@ -325,10 +337,11 @@ def test_custom_auth_multi_round(cognito_idp, lam):
     """Three steps: InitiateAuth → Respond(magic link) → Respond(SMS OTP) → tokens."""
     create_handler = (
         "def handler(event, ctx):\n"
-        "    if len(event['request']['session']) == 1:\n"
-        "        event['response']['publicChallengeParameters'] = {'challenge': 'MAGIC_LINK'}\n"
+        "    answered_count = len([c for c in event['request']['session'] if c.get('challengeResult')])\n"
+        "    if answered_count == 0:\n"
+        "        event['response']['publicChallengeParameters'] = {'round': '1', 'challenge': 'MAGIC_LINK'}\n"
         "    else:\n"
-        "        event['response']['publicChallengeParameters'] = {'challenge': 'SMS_OTP'}\n"
+        "        event['response']['publicChallengeParameters'] = {'round': str(answered_count + 1), 'challenge': 'SMS_OTP'}\n"
         "    return event\n"
     )
     verify_handler = (
@@ -338,10 +351,13 @@ def test_custom_auth_multi_round(cognito_idp, lam):
     )
     define_handler = (
         "def handler(event, ctx):\n"
-        "    if len(event['request']['session']) == 1:\n"
+        "    session = event['request']['session']\n"
+        "    if not session:\n"
         "        event['response']['challengeName'] = 'CUSTOM_CHALLENGE'\n"
-        "    else:\n"
+        "    elif session[-1].get('challengeResult'):\n"
         "        event['response']['issueTokens'] = True\n"
+        "    else:\n"
+        "        event['response']['failAuthentication'] = True\n"
         "    return event\n"
     )
     create_arn = _create_lambda(lam, "create-multi", create_handler)
@@ -474,7 +490,13 @@ def test_custom_auth_admin_respond(cognito_idp, lam):
     )
     define_handler = (
         "def handler(event, ctx):\n"
-        "    event['response']['issueTokens'] = True\n"
+        "    session = event['request']['session']\n"
+        "    if not session:\n"
+        "        event['response']['challengeName'] = 'CUSTOM_CHALLENGE'\n"
+        "    elif session[-1].get('challengeResult'):\n"
+        "        event['response']['issueTokens'] = True\n"
+        "    else:\n"
+        "        event['response']['failAuthentication'] = True\n"
         "    return event\n"
     )
     verify_arn = _create_lambda(lam, "verify-admin", verify_handler)
@@ -543,9 +565,31 @@ def test_custom_auth_session_persistence():
 
 # ── Test 18: Concurrent sessions for same user ───────────────────────────────
 
-def test_custom_auth_concurrent_sessions(cognito_idp):
+def test_custom_auth_concurrent_sessions(cognito_idp, lam):
     """Two parallel auth flows for the same user get independent, usable tokens."""
-    pid, cid = _setup_pool(cognito_idp, "ConcurrentPool")
+    define_handler = (
+        "def handler(event, ctx):\n"
+        "    session = event['request']['session']\n"
+        "    if not session:\n"
+        "        event['response']['challengeName'] = 'CUSTOM_CHALLENGE'\n"
+        "    elif session[-1].get('challengeResult'):\n"
+        "        event['response']['issueTokens'] = True\n"
+        "    else:\n"
+        "        event['response']['failAuthentication'] = True\n"
+        "    return event\n"
+    )
+    verify_handler = (
+        "def handler(event, ctx):\n"
+        "    event['response']['answerCorrect'] = True\n"
+        "    return event\n"
+    )
+    define_arn = _create_lambda(lam, "define-concurrent", define_handler)
+    verify_arn = _create_lambda(lam, "verify-concurrent", verify_handler)
+
+    pid, cid = _setup_pool(cognito_idp, "ConcurrentPool", {
+        "DefineAuthChallenge": define_arn,
+        "VerifyAuthChallengeResponse": verify_arn,
+    })
 
     s1 = cognito_idp.initiate_auth(
         ClientId=cid, AuthFlow="CUSTOM_AUTH",
@@ -558,7 +602,7 @@ def test_custom_auth_concurrent_sessions(cognito_idp):
 
     assert s1 != s2
 
-    # Both tokens are live and independent
+    # Both tokens are live and independent — complete each to tokens
     r1 = cognito_idp.respond_to_auth_challenge(
         ClientId=cid, ChallengeName="CUSTOM_CHALLENGE", Session=s1,
         ChallengeResponses={"ANSWER": "", "USERNAME": "user@example.com"},
@@ -567,8 +611,9 @@ def test_custom_auth_concurrent_sessions(cognito_idp):
         ClientId=cid, ChallengeName="CUSTOM_CHALLENGE", Session=s2,
         ChallengeResponses={"ANSWER": "", "USERNAME": "user@example.com"},
     )
-    assert r1["ChallengeName"] == "CUSTOM_CHALLENGE" and r1["Session"] == s1
-    assert r2["ChallengeName"] == "CUSTOM_CHALLENGE" and r2["Session"] == s2
+    # Each session should issue tokens independently (DefineAuthChallenge sees a completed challenge)
+    assert "AuthenticationResult" in r1
+    assert "AuthenticationResult" in r2
 
 
 # ── Test 19: LambdaConfig keys stored correctly ───────────────────────────────
@@ -606,7 +651,11 @@ def test_custom_auth_define_unexpected_response_clears_session(cognito_idp, lam)
     )
     define_handler = (
         "def handler(event, ctx):\n"
-        "    pass\n"
+        "    session = event['request']['session']\n"
+        "    if not session:\n"
+        "        event['response']['challengeName'] = 'CUSTOM_CHALLENGE'\n"
+        "    else:\n"
+        "        pass\n"
         "    return event\n"
     )
     verify_arn = _create_lambda(lam, "verify-unexpected", verify_handler)
@@ -655,8 +704,13 @@ def test_custom_auth_empty_answer_passed_to_lambda(cognito_idp, lam):
     )
     define_handler = (
         "def handler(event, ctx):\n"
-        "    if event['request']['session'][-1].get('challengeResult'):\n"
+        "    session = event['request']['session']\n"
+        "    if not session:\n"
+        "        event['response']['challengeName'] = 'CUSTOM_CHALLENGE'\n"
+        "    elif session[-1].get('challengeResult'):\n"
         "        event['response']['issueTokens'] = True\n"
+        "    else:\n"
+        "        event['response']['failAuthentication'] = True\n"
         "    return event\n"
     )
     verify_arn = _create_lambda(lam, "verify-empty-answer", verify_handler)
@@ -714,7 +768,13 @@ def test_custom_auth_session_cleared_after_tokens_issued(cognito_idp, lam):
     )
     define_handler = (
         "def handler(event, ctx):\n"
-        "    event['response']['issueTokens'] = True\n"
+        "    session = event['request']['session']\n"
+        "    if not session:\n"
+        "        event['response']['challengeName'] = 'CUSTOM_CHALLENGE'\n"
+        "    elif session[-1].get('challengeResult'):\n"
+        "        event['response']['issueTokens'] = True\n"
+        "    else:\n"
+        "        event['response']['failAuthentication'] = True\n"
         "    return event\n"
     )
     verify_arn = _create_lambda(lam, "verify-cleanup", verify_handler)
@@ -763,7 +823,13 @@ def test_custom_auth_client_metadata_propagated_to_verify(cognito_idp, lam):
     )
     define_handler = (
         "def handler(event, ctx):\n"
-        "    event['response']['issueTokens'] = True\n"
+        "    session = event['request']['session']\n"
+        "    if not session:\n"
+        "        event['response']['challengeName'] = 'CUSTOM_CHALLENGE'\n"
+        "    elif session[-1].get('challengeResult'):\n"
+        "        event['response']['issueTokens'] = True\n"
+        "    else:\n"
+        "        event['response']['failAuthentication'] = True\n"
         "    return event\n"
     )
     verify_arn = _create_lambda(lam, "verify-meta-respond", verify_handler)
@@ -863,17 +929,19 @@ def test_custom_auth_session_list_grows_across_rounds(cognito_idp, lam):
     """Each round appends one entry to session['challenges']; DefineAuth sees the correct history."""
     define_handler = (
         "def handler(event, ctx):\n"
-        "    session_len = len(event['request']['session'])\n"
-        "    event['response']['publicChallengeParameters']['round'] = str(session_len)\n"
-        "    if session_len == 1:\n"
+        "    session = event['request']['session']\n"
+        "    if not session:\n"
         "        event['response']['challengeName'] = 'CUSTOM_CHALLENGE'\n"
-        "    else:\n"
+        "    elif session[-1].get('challengeResult'):\n"
         "        event['response']['issueTokens'] = True\n"
+        "    else:\n"
+        "        event['response']['failAuthentication'] = True\n"
         "    return event\n"
     )
     create_handler = (
         "def handler(event, ctx):\n"
-        "    event['response']['publicChallengeParameters'] = {'challenge': 'MAGIC_LINK', 'round': ''}\n"
+        "    session = event['request']['session']\n"
+        "    event['response']['publicChallengeParameters'] = {'challenge': 'MAGIC_LINK', 'round': str(len(session))}\n"
         "    return event\n"
     )
     verify_handler = (
