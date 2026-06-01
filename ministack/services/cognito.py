@@ -2290,7 +2290,23 @@ def _admin_initiate_auth(data):
             pid, cid, username, user_attrs, session
         )
         if err:
+            del _challenge_sessions[token]
             return err
+
+        # Evaluate Define result before proceeding to Create
+        if define_result is not None:
+            resp = define_result.get("response", {}) or {}
+            if resp.get("failAuthentication"):
+                del _challenge_sessions[token]
+                return error_response_json("NotAuthorizedException", "Authentication failed", 400)
+            if resp.get("issueTokens"):
+                del _challenge_sessions[token]
+                return json_response({"AuthenticationResult": _build_auth_result(pid, cid, user)})
+            if not resp.get("challengeName"):
+                del _challenge_sessions[token]
+                return error_response_json("InvalidLambdaResponseException",
+                    "DefineAuthChallenge returned unexpected response — not issuing tokens, "
+                    "not failing auth, and no challengeName set", 400)
 
         # Add a pending challenge to session before checking if define/create need to happen
         _append_challenge_to_session(session, "CUSTOM_CHALLENGE", None, None, {}, {})
@@ -2323,13 +2339,6 @@ def _admin_initiate_auth(data):
                 "challengeMetadata": challenge_metadata or session["challenges"][-1].get("challengeMetadata"),
             })
             session["last_challenge_metadata"] = challenge_metadata
-
-        # Check if DefineAuthChallenge already issued tokens (zero-round bypass)
-        if define_result is not None:
-            define_resp = define_result.get("response", {}) or {}
-            if define_resp.get("issueTokens"):
-                del _challenge_sessions[token]
-                return json_response({"AuthenticationResult": _build_auth_result(pid, cid, user)})
 
         # Return challenge to client
         return json_response({
@@ -2622,7 +2631,23 @@ def _initiate_auth(data):
             pid, cid, username, user_attrs, session
         )
         if err:
+            del _challenge_sessions[token]
             return err
+
+        # Evaluate Define result before proceeding to Create
+        if define_result is not None:
+            resp = define_result.get("response", {}) or {}
+            if resp.get("failAuthentication"):
+                del _challenge_sessions[token]
+                return error_response_json("NotAuthorizedException", "Authentication failed", 400)
+            if resp.get("issueTokens"):
+                del _challenge_sessions[token]
+                return json_response({"AuthenticationResult": _build_auth_result(pid, cid, user)})
+            if not resp.get("challengeName"):
+                del _challenge_sessions[token]
+                return error_response_json("InvalidLambdaResponseException",
+                    "DefineAuthChallenge returned unexpected response — not issuing tokens, "
+                    "not failing auth, and no challengeName set", 400)
 
         # Add a pending challenge to session before checking if define/create need to happen
         _append_challenge_to_session(session, "CUSTOM_CHALLENGE", None, None, {}, {})
@@ -2655,13 +2680,6 @@ def _initiate_auth(data):
                 "challengeMetadata": challenge_metadata or session["challenges"][-1].get("challengeMetadata"),
             })
             session["last_challenge_metadata"] = challenge_metadata
-
-        # Check if DefineAuthChallenge already issued tokens (zero-round bypass)
-        if define_result is not None:
-            define_resp = define_result.get("response", {}) or {}
-            if define_resp.get("issueTokens"):
-                del _challenge_sessions[token]
-                return json_response({"AuthenticationResult": _build_auth_result(pid, cid, user)})
 
         # Return challenge to client
         return json_response({
