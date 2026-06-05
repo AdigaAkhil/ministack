@@ -808,8 +808,10 @@ def _resolve_script(script_location):
         parts = stripped.split("/", 1)
         bucket = parts[0]
         key = parts[1] if len(parts) > 1 else ""
-        # Check on-disk first
-        local_path = os.path.join(S3_DATA_DIR, bucket, key)
+        # Check on-disk first. Objects are persisted account-scoped at
+        # DATA_DIR/<account>/<bucket>/<key> (see s3._object_disk_path), so the
+        # account id MUST be part of the lookup path or it never matches.
+        local_path = os.path.join(S3_DATA_DIR, get_account_id(), bucket, key)
         if os.path.exists(local_path):
             return local_path
         # Fetch from in-memory S3
