@@ -1235,3 +1235,38 @@ def test_glue_crawler_completes_for_non_default_account(monkeypatch):
     finally:
         respmod._request_account_id.reset(token)
         gluemod._crawlers._data.pop((account, name), None)
+
+
+def test_glue_resolve_script_isolated_per_account(tmp_path, monkeypatch):
+    """A script persisted under one account is not resolvable from another (#827).
+
+    Guards the core multi-tenancy property: account-scoped resolution must not
+    leak one tenant's on-disk objects to another.
+    """
+    from ministack.core import responses as respmod
+    from ministack.services import s3 as s3mod
+    from ministack.services import glue as gluemod
+
+    monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(s3mod, "S3_PERSIST", True)
+    monkeypatch.setattr(gluemod, "S3_DATA_DIR", str(tmp_path))
+
+    owner = "111111111111"
+    other = "222222222222"
+    uri = "s3://scripts-bucket/jobs/etl.py"
+
+    tok_owner = respmod._request_account_id.set(owner)
+    try:
+        s3mod._persist_object("scripts-bucket", "jobs/etl.py", b"print('ok')\n")
+        owner_path = gluemod._resolve_script(uri)
+        assert owner_path is not None and owner in owner_path
+    finally:
+        respmod._request_account_id.reset(tok_owner)
+
+    tok_other = respmod._request_account_id.set(other)
+    try:
+        # 'other' has no such object on disk (scoped under its own account) or
+        # in memory, so the lookup must not surface 'owner's script.
+        assert gluemod._resolve_script(uri) is None
+    finally:
+        respmod._request_account_id.reset(tok_other)
