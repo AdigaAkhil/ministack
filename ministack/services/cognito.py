@@ -2334,10 +2334,10 @@ def _admin_initiate_auth(data):
                     "DefineAuthChallenge returned unexpected response — not issuing tokens, "
                     "not failing auth, and no challengeName set", 400)
 
-        # Add a pending challenge to session before checking if define/create need to happen
-        _append_challenge_to_session(session, "CUSTOM_CHALLENGE", None, None, {}, {})
-
-        # Invoke CreateAuthChallenge
+        # Invoke CreateAuthChallenge. AWS passes an EMPTY session array to the
+        # first CreateAuthChallenge (the round being created is not itself a
+        # session entry), so append the pending round AFTER Create runs —
+        # mirroring the round-2+ path in RespondToAuthChallenge.
         create_result, err = _invoke_create_auth_challenge_trigger(
             pid, cid, username, user_attrs, session, client_metadata
         )
@@ -2357,14 +2357,9 @@ def _admin_initiate_auth(data):
             private_params = {"challenge": "PROVIDE_AUTH_PARAMETERS"}
             challenge_metadata = None
 
-        # Update session with challenge parameters
-        if session["challenges"]:
-            session["challenges"][-1].update({
-                "publicChallengeParameters": public_params,
-                "privateChallengeParameters": private_params,
-                "challengeMetadata": challenge_metadata or session["challenges"][-1].get("challengeMetadata"),
-            })
-            session["last_challenge_metadata"] = challenge_metadata
+        # Append the pending round with the parameters from CreateAuthChallenge.
+        _append_challenge_to_session(session, "CUSTOM_CHALLENGE", None, challenge_metadata,
+                                    public_params, private_params)
 
         # Return challenge to client
         return json_response({
@@ -2681,10 +2676,10 @@ def _initiate_auth(data):
                     "DefineAuthChallenge returned unexpected response — not issuing tokens, "
                     "not failing auth, and no challengeName set", 400)
 
-        # Add a pending challenge to session before checking if define/create need to happen
-        _append_challenge_to_session(session, "CUSTOM_CHALLENGE", None, None, {}, {})
-
-        # Invoke CreateAuthChallenge
+        # Invoke CreateAuthChallenge. AWS passes an EMPTY session array to the
+        # first CreateAuthChallenge (the round being created is not itself a
+        # session entry), so append the pending round AFTER Create runs —
+        # mirroring the round-2+ path in RespondToAuthChallenge.
         create_result, err = _invoke_create_auth_challenge_trigger(
             pid, cid, username, user_attrs, session, client_metadata
         )
@@ -2704,14 +2699,9 @@ def _initiate_auth(data):
             private_params = {"challenge": "PROVIDE_AUTH_PARAMETERS"}
             challenge_metadata = None
 
-        # Update session with challenge parameters
-        if session["challenges"]:
-            session["challenges"][-1].update({
-                "publicChallengeParameters": public_params,
-                "privateChallengeParameters": private_params,
-                "challengeMetadata": challenge_metadata or session["challenges"][-1].get("challengeMetadata"),
-            })
-            session["last_challenge_metadata"] = challenge_metadata
+        # Append the pending round with the parameters from CreateAuthChallenge.
+        _append_challenge_to_session(session, "CUSTOM_CHALLENGE", None, challenge_metadata,
+                                    public_params, private_params)
 
         # Return challenge to client
         return json_response({

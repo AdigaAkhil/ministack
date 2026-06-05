@@ -927,7 +927,8 @@ def test_custom_auth_define_present_create_absent(cognito_idp, lam):
 # ── Test 28: Session list grows correctly across rounds ───────────────────────
 
 def test_custom_auth_session_list_grows_across_rounds(cognito_idp, lam):
-    """Each round appends one entry to session['challenges']; DefineAuth sees the correct history."""
+    """Each round appends one entry to session['challenges']; DefineAuth sees the correct history.
+    The first CreateAuthChallenge sees an empty session (AWS parity), so round == "0"."""
     define_handler = (
         "def handler(event, ctx):\n"
         "    session = event['request']['session']\n"
@@ -964,7 +965,7 @@ def test_custom_auth_session_list_grows_across_rounds(cognito_idp, lam):
         ClientId=cid, AuthFlow="CUSTOM_AUTH",
         AuthParameters={"USERNAME": "user@example.com"},
     )
-    assert step1["ChallengeParameters"]["round"] == "1"
+    assert step1["ChallengeParameters"]["round"] == "0"
     session = step1["Session"]
 
     step2 = cognito_idp.respond_to_auth_challenge(
