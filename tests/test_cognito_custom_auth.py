@@ -1200,3 +1200,131 @@ def test_custom_auth_issue_725_private_params_carry_through(cognito_idp, lam):
         ChallengeResponses={"ANSWER": "only-server-knows", "USERNAME": "user@example.com"},
     )
     assert "AccessToken" in r2["AuthenticationResult"]
+
+
+# ── Regression: verify result is merged into the round it belongs to ──────────
+#
+# AWS records ONE ChallengeResult per CUSTOM_AUTH round, carrying BOTH the
+# challengeMetadata (set by CreateAuthChallenge) AND the challengeResult (from
+# VerifyAuthChallengeResponse). The triggers below model a real consumer
+# (magic-link -> SMS-OTP) that identifies the completed step by reading BOTH
+# fields from the SAME session element. With the prior split-entry behaviour the
+# verify result landed in a second, metadata-less record, so the magic-link
+# round was never recognised as complete and the SMS-OTP step never ran.
+
+# CreateAuthChallenge: round 1 = MAGIC_LINK, round 2+ = SMS_OTP, with the step
+# name carried in challengeMetadata (not just publicChallengeParameters).
+_MERGE_CREATE_HANDLER = (
+    "def handler(event, ctx):\n"
+    "    answered = [c for c in event['request']['session']"
+    " if c.get('challengeResult') is not None]\n"
+    "    step = 'MAGIC_LINK' if len(answered) == 0 else 'SMS_OTP'\n"
+    "    event['response']['publicChallengeParameters'] = {'challenge': step}\n"
+    "    event['response']['challengeMetadata'] = step\n"
+    "    return event\n"
+)
+_MERGE_VERIFY_HANDLER = (
+    "def handler(event, ctx):\n"
+    "    event['response']['answerCorrect'] = True\n"
+    "    return event\n"
+)
+# DefineAuthChallenge advances ONLY when a round is a single merged entry:
+# challengeResult truthy AND the expected challengeMetadata on the SAME element.
+# Under the split-entry bug the MAGIC_LINK round is never 'done', so this falls
+# through to failAuthentication and never reaches the SMS_OTP step.
+_MERGE_DEFINE_HANDLER = (
+    "def handler(event, ctx):\n"
+    "    session = event['request']['session']\n"
+    "    def done(meta):\n"
+    "        return any(c.get('challengeResult') and c.get('challengeMetadata') == meta\n"
+    "                   for c in session)\n"
+    "    if not session:\n"
+    "        event['response']['challengeName'] = 'CUSTOM_CHALLENGE'\n"
+    "    elif done('MAGIC_LINK') and done('SMS_OTP'):\n"
+    "        event['response']['issueTokens'] = True\n"
+    "    elif done('MAGIC_LINK'):\n"
+    "        event['response']['challengeName'] = 'CUSTOM_CHALLENGE'\n"
+    "    else:\n"
+    "        event['response']['failAuthentication'] = True\n"
+    "    return event\n"
+)
+
+
+def test_custom_auth_merged_result_metadata_advances_steps(cognito_idp, lam):
+    """A round's metadata and result live on one session entry, so a multi-step
+    magic-link -> SMS-OTP flow completes (RespondToAuthChallenge path)."""
+    create_arn = _create_lambda(lam, "create-merge", _MERGE_CREATE_HANDLER)
+    verify_arn = _create_lambda(lam, "verify-merge", _MERGE_VERIFY_HANDLER)
+    define_arn = _create_lambda(lam, "define-merge", _MERGE_DEFINE_HANDLER)
+
+    pid, cid = _setup_pool(cognito_idp, "MergeResultPool", {
+        "CreateAuthChallenge": create_arn,
+        "VerifyAuthChallengeResponse": verify_arn,
+        "DefineAuthChallenge": define_arn,
+    })
+
+    step1 = cognito_idp.initiate_auth(
+        ClientId=cid, AuthFlow="CUSTOM_AUTH",
+        AuthParameters={"USERNAME": "user@example.com"},
+    )
+    assert step1["ChallengeParameters"]["challenge"] == "MAGIC_LINK"
+    session = step1["Session"]
+
+    # Round 1 (magic link). On the buggy split-entry shape this raises
+    # NotAuthorizedException because the round is never recognised as complete.
+    step2 = cognito_idp.respond_to_auth_challenge(
+        ClientId=cid,
+        ChallengeName="CUSTOM_CHALLENGE",
+        Session=session,
+        ChallengeResponses={"ANSWER": "magic-link-token", "USERNAME": "user@example.com"},
+    )
+    assert step2.get("ChallengeName") == "CUSTOM_CHALLENGE"
+    assert step2["ChallengeParameters"]["challenge"] == "SMS_OTP"
+
+    # Round 2 (SMS OTP) -> tokens.
+    step3 = cognito_idp.respond_to_auth_challenge(
+        ClientId=cid,
+        ChallengeName="CUSTOM_CHALLENGE",
+        Session=session,
+        ChallengeResponses={"ANSWER": "123456", "USERNAME": "user@example.com"},
+    )
+    assert "AuthenticationResult" in step3
+    assert step3["AuthenticationResult"].get("IdToken")
+
+
+def test_custom_auth_admin_merged_result_metadata_advances_steps(cognito_idp, lam):
+    """Same merged-round contract on the AdminRespondToAuthChallenge path."""
+    create_arn = _create_lambda(lam, "create-merge-admin", _MERGE_CREATE_HANDLER)
+    verify_arn = _create_lambda(lam, "verify-merge-admin", _MERGE_VERIFY_HANDLER)
+    define_arn = _create_lambda(lam, "define-merge-admin", _MERGE_DEFINE_HANDLER)
+
+    pid, cid = _setup_pool(cognito_idp, "MergeResultAdminPool", {
+        "CreateAuthChallenge": create_arn,
+        "VerifyAuthChallengeResponse": verify_arn,
+        "DefineAuthChallenge": define_arn,
+    })
+
+    step1 = cognito_idp.admin_initiate_auth(
+        UserPoolId=pid, ClientId=cid, AuthFlow="CUSTOM_AUTH",
+        AuthParameters={"USERNAME": "user@example.com"},
+    )
+    assert step1["ChallengeParameters"]["challenge"] == "MAGIC_LINK"
+    session = step1["Session"]
+
+    step2 = cognito_idp.admin_respond_to_auth_challenge(
+        UserPoolId=pid, ClientId=cid,
+        ChallengeName="CUSTOM_CHALLENGE",
+        Session=session,
+        ChallengeResponses={"ANSWER": "magic-link-token", "USERNAME": "user@example.com"},
+    )
+    assert step2.get("ChallengeName") == "CUSTOM_CHALLENGE"
+    assert step2["ChallengeParameters"]["challenge"] == "SMS_OTP"
+
+    step3 = cognito_idp.admin_respond_to_auth_challenge(
+        UserPoolId=pid, ClientId=cid,
+        ChallengeName="CUSTOM_CHALLENGE",
+        Session=session,
+        ChallengeResponses={"ANSWER": "123456", "USERNAME": "user@example.com"},
+    )
+    assert "AuthenticationResult" in step3
+    assert step3["AuthenticationResult"].get("IdToken")
